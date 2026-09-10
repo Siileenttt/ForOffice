@@ -1,0 +1,381 @@
+﻿Yes. If you created your **own XML file** for the database connection string and email configuration, you can configure it cleanly. For your 3-layer application, I recommend keeping configuration separate from DAL/BAL code.
+
+## 1. Create `AppConfig.xml`
+
+For example:
+
+```xml
+<?xml version="1.0" encoding="utf-8" ?>
+<AppConfig>
+
+  <Database>
+    <ConnectionString>
+      Server=localhost;
+      Database=EmployeeDB;
+      Trusted_Connection=True;
+    </ConnectionString>
+  </Database>
+
+  <Email>
+    <FromEmail>sender@company.com</FromEmail>
+    <ToEmail>manager@company.com</ToEmail>
+    <SmtpServer>smtp.company.com</SmtpServer>
+    <Port>587</Port>
+    <EnableSSL>true</EnableSSL>
+  </Email>
+
+</AppConfig>
+```
+
+For a real application, **don't store the SMTP password as plain text in this XML**. Use a secret store/environment variable or another protected configuration mechanism.
+
+---
+
+# 2. Put the XML in your project
+
+For example:
+
+```text
+EmployeeMailApplication
+│
+├── AppConfig.xml
+│
+├── BO
+│   └── EmployeeModel.cs
+│
+├── DAL
+│   └── EmployeeDAL.cs
+│
+├── BAL
+│   └── EmployeeBAL.cs
+│
+└── Program.cs
+```
+
+Set the XML file's properties to:
+
+```text
+Build Action     → Content
+Copy to Output  → Copy if newer
+```
+
+Then after building, it should be available beside your executable.
+
+---
+
+# 3. Create a Configuration Class
+
+Create:
+
+```text
+Common
+└── AppConfig.cs
+```
+
+```csharp
+using System;
+using System.IO;
+using System.Xml.Linq;
+
+namespace EmployeeMailApplication.Common
+{
+    public static class AppConfig
+    {
+        private static readonly string filePath =
+            Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "AppConfig.xml");
+
+        private static readonly XDocument config =
+            XDocument.Load(filePath);
+
+        public static string ConnectionString
+        {
+            get
+            {
+                return config
+                    .Root
+                    .Element("Database")
+                    .Element("ConnectionString")
+                    .Value
+                    .Trim();
+            }
+        }
+
+        public static string FromEmail
+        {
+            get
+            {
+                return config
+                    .Root
+                    .Element("Email")
+                    .Element("FromEmail")
+                    .Value
+                    .Trim();
+            }
+        }
+
+        public static string ToEmail
+        {
+            get
+            {
+                return config
+                    .Root
+                    .Element("Email")
+                    .Element("ToEmail")
+                    .Value
+                    .Trim();
+            }
+        }
+
+        public static string SmtpServer
+        {
+            get
+            {
+                return config
+                    .Root
+                    .Element("Email")
+                    .Element("SmtpServer")
+                    .Value
+                    .Trim();
+            }
+        }
+
+        public static int Port
+        {
+            get
+            {
+                return Convert.ToInt32(
+                    config
+                        .Root
+                        .Element("Email")
+                        .Element("Port")
+                        .Value);
+            }
+        }
+
+        public static bool EnableSSL
+        {
+            get
+            {
+                return Convert.ToBoolean(
+                    config
+                        .Root
+                        .Element("Email")
+                        .Element("EnableSSL")
+                        .Value);
+            }
+        }
+    }
+}
+```
+
+Now your application has one place responsible for reading configuration.
+
+---
+
+# 4. Use it in DAL
+
+Previously we had:
+
+```csharp
+connectionString =
+    ConfigurationManager
+    .ConnectionStrings["EmployeeDb"]
+    .ConnectionString;
+```
+
+Now you can simply do:
+
+```csharp
+using EmployeeMailApplication.Common;
+
+public class EmployeeDAL
+{
+    private readonly string connectionString;
+
+    public EmployeeDAL()
+    {
+        connectionString = AppConfig.ConnectionString;
+    }
+
+    // ...
+}
+```
+
+Your DAL then becomes:
+
+```csharp
+using System.Data;
+using System.Data.SqlClient;
+using EmployeeMailApplication.Common;
+
+namespace EmployeeMailApplication.DAL
+{
+    public class EmployeeDAL
+    {
+        public DataTable GetEmployeeReport()
+        {
+            DataTable dt = new DataTable();
+
+            using (SqlConnection con =
+                   new SqlConnection(AppConfig.ConnectionString))
+            {
+                using (SqlCommand cmd =
+                       new SqlCommand(
+                           "GetEmployeeReport",
+                           con))
+                {
+                    cmd.CommandType =
+                        CommandType.StoredProcedure;
+
+                    using (SqlDataAdapter adapter =
+                           new SqlDataAdapter(cmd))
+                    {
+                        adapter.Fill(dt);
+                    }
+                }
+            }
+
+            return dt;
+        }
+    }
+}
+```
+
+---
+
+# 5. Use it in Email Service
+
+I recommend **not putting email code directly into BAL**.
+
+Create:
+
+```text
+Common
+│
+├── AppConfig.cs
+└── EmailService.cs
+```
+
+```csharp
+using System.Net;
+using System.Net.Mail;
+
+namespace EmployeeMailApplication.Common
+{
+    public class EmailService
+    {
+        public void SendEmail(
+            string subject,
+            string htmlBody)
+        {
+            MailMessage mail =
+                new MailMessage();
+
+            mail.From =
+                new MailAddress(
+                    AppConfig.FromEmail);
+
+            mail.To.Add(
+                AppConfig.ToEmail);
+
+            mail.Subject = subject;
+
+            mail.Body = htmlBody;
+
+            mail.IsBodyHtml = true;
+
+            SmtpClient smtp =
+                new SmtpClient(
+                    AppConfig.SmtpServer);
+
+            smtp.Port =
+                AppConfig.Port;
+
+            smtp.EnableSsl =
+                AppConfig.EnableSSL;
+
+            smtp.Send(mail);
+        }
+    }
+}
+```
+
+---
+
+# 6. BAL uses EmailService
+
+Your BAL becomes cleaner:
+
+```csharp
+public class EmployeeBAL
+{
+    private readonly EmployeeDAL employeeDAL;
+    private readonly EmailService emailService;
+
+    public EmployeeBAL()
+    {
+        employeeDAL = new EmployeeDAL();
+        emailService = new EmailService();
+    }
+
+    public void GenerateAndSendReport()
+    {
+        // 1. Get data
+        DataTable dt =
+            employeeDAL.GetEmployeeReport();
+
+        // 2. Convert to models
+        List<EmployeeModel> employees =
+            ConvertToModels(dt);
+
+        // 3. Create HTML
+        string html =
+            CreateEmployeeTable(employees);
+
+        // 4. Send email
+        emailService.SendEmail(
+            "Employee Report",
+            html);
+    }
+}
+```
+
+So now your architecture is:
+
+```text
+                 Program
+                    │
+                    ▼
+                  BAL
+             ┌──────┴──────┐
+             ▼             ▼
+            DAL       EmailService
+             │             │
+             ▼             ▼
+        SQL Server      SMTP Server
+             │
+             ▼
+          DataTable
+             │
+             ▼
+         BO / Model
+```
+
+And configuration is centralized:
+
+```text
+              AppConfig.xml
+                    │
+             ┌──────┴──────┐
+             ▼             ▼
+            DAL       EmailService
+             │             │
+       Connection       Email/SMTP
+        settings         settings
+```
+
+### One recommendation
+
+If this is for your **existing Web Forms project**, you can do this, but if you are starting a new .NET application, I'd prefer the standard **`appsettings.json` + `IConfiguration` + Options pattern** rather than a custom XML file. It will also make your eventual Web Forms → .NET Core migration much easier.
